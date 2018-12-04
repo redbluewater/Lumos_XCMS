@@ -1,0 +1,291 @@
+Parameters for UPLC data from the Lumos (used LW extracellular DOM data as test case)
+Updated to use new peakShape_KL.r
+
+Krista Longnecker
+Woods Hole Oceanographic Institution
+September 24, 2018
+========================================================
+
+Go ahead and load up some of the parameters:
+```{r Settings, eval=TRUE}
+library(xcms)
+library(CAMERA)
+library(RColorBrewer)
+library(ggplot2)
+library(ggdendro)
+library(XLConnect)
+
+```
+
+
+Now go ahead and do the peak picking, or load in the existing file...peak picking can be time consuming and it easier to only do that once
+
+```{r GettingData, eval = TRUE}
+
+##if you want to save time and process shorter time section, can set the 
+##scanrange here (min and mx time, in seconds), and add scanrange = scanrange
+##to the centWave peak picking below
+#scanrange=c(100,300)
+
+usePath <- "C:/Users/krista/Documents/mzML_Lumos_MS1_updated"
+
+ext <- ".mzML"
+pre <- paste0(usePath,"/")
+
+mzdatafiles <- list.files(usePath,recursive = FALSE, full.names=TRUE,
+                          pattern = paste0("\\",ext))
+
+# ## How many CPU cores has your machine (or cluster) ?
+snowparam <- SnowParam(workers = 4, type = "SOCK")
+
+#no need to repeat the peak picking
+if(0) {
+    load("ExistingDataFile.Rimage")
+  } else {
+    
+    setNoise = 10000 #for UPLC, noise level looks ~10000 (visually, from MZmine)
+
+    #Note on ppm - I have not converged on a good ppm for intracellular metabolites, 
+    #and the extracellular value should be considered tentative for now
+    xs<-xcmsSet(mzdatafiles, method = "centWave",ppm = 10,snthresh = 100,
+      prefilter = c(4,setNoise), mzCenterFun = "wMean",integrate = 2, 
+      verbose.columns = TRUE, peakwidth=c(5,15), fitgauss= TRUE, noise = setNoise, 
+      mzdiff=-0.005,BPPARAM=snowparam) #,sleep = 0.0001)#scanrange = scanrange)
+}
+
+
+
+```
+
+
+```{r settingFileNames}
+# #setup the filenames all in one place bc easier...
+#put this here bc if we load in data already with peak picking...that will bring in a NameOfFile
+
+nDate <- "2018.07.10_v2"
+nBase <- "dataset_UPLC_neg_samples"
+fName_allPeaks <- paste0(nBase,'_listAllPeaks.',nDate,'.csv')
+fName_aligned <- paste0(nBase,'_aligned.',nDate,'.csv')
+fName_peaksPicked <- paste0(nBase, '_picked.',nDate, '.pdf')
+fName_TICplot <- paste0(nBase,'_TICplot.',nDate,'.pdf')
+NameOfFile <- paste0(nBase,"_",nDate,".Rimage")
+rm(nDate,nBase)
+
+save.image(NameOfFile)
+
+
+```
+
+
+
+```{r apply_peakShape_KL, eval=TRUE}
+# # #####the peakShape code seems to be from Tony Larson...via the Google Groups forum  
+# # Note the difference syntax with read_chunk from within the R Markdown file
+# updated 9/24/2018 to use peakShape_KL.r which allows for the larger peak areas from the Lumos
+source("peakShape_KL.r")  
+
+if(1){
+  #run peak shape...
+  xs2 <- peakShape_KL(xs,cor.val=0.85)
+  } else {
+    #skip for the moment
+    xs2<-xs
+}
+# 
+
+```
+
+
+Setup the ability to rename the classes based on information in the CSV file
+
+```{r getSampleInformation, eval=TRUE}
+#figure out how to pass values to/from functions later...use this to match the files 
+#with the information about what sample was run for each file
+wDir <-  "C:/Users/sequence_fromMethods/"
+
+all <- readWorksheetFromFile(paste0(wDir,"EditedSequencFile.xlsx"),sheet = 1)
+putDataHere <-data.frame()
+
+for(i in 1:length(all$File.Name)) {
+  h <- all$File.Name[i]
+  #paste0 will strip out the spaces; make the full filename here    
+  h <-paste0(pre,h,ext)
+  
+  #this will pick up the right row in mzdatafiles
+  m <- match(basename(h),basename(xs2@filepaths))
+  if (!is.na(m)) {
+    tData <- all[i,]
+    if (nrow(putDataHere)==0) {
+      putDataHere <- tData
+      } else {
+    putDataHere[m,] <-tData
+    }
+    rm(tData)
+  }   
+  rm(h,m)
+}   
+
+rm(all) #keep this clean...
+
+# rm(classlist) 
+classlist <- matrix()
+#this next bit is a hack, but it works in the context of xcms
+for (i in 1:nrow(putDataHere)) {
+  classlist[i] <- paste0(putDataHere$ionMode[i], ".", putDataHere$goodData[i])
+}
+rm(i)
+
+
+```
+
+
+```{r setupGrouping, eval=TRUE}
+     
+##now I will need to consider the groups. First 'group' is actually the ionization mode
+#for simplicity, start by using split to get the files from one ionization mode  
+#useXS <- xs2
+
+#define the classes after the peak picking...
+sampclass(xs2) <- classlist 
+
+#note this will select files in negative ion mode that are marked with '1' in the GoodData column
+xsOne <- split(xs2,classlist)[["negative.1"]]
+putDataHere.1 <- split(putDataHere,classlist)[["negative.1"]]
+nSamples<-length(xsOne@filepaths)
+
+classlist.1 <- matrix()
+#this next bit is a hack, but it works in the context of xcms
+for (i in 1:nrow(putDataHere.1)) {
+  classlist.1[i] <-paste0(putDataHere.1$ionMode[i],".",putDataHere.1$goodData[i])
+}
+
+#set the groups to the QC/blank/samples before grouping:
+sampclass(xsOne) <-classlist.1
+
+```
+
+```{r RT_Group, eval = TRUE}
+
+#start with the retention time correction for this set of samples
+
+#set the center sample so it selects one of the pooled samples...which date?
+#setCenter <- grep("mtab_DeepDOM_mega_FTLC_99",putDataHere.1$File.Name) #first batch
+
+#setting the response=1 here essentially makes this a linear fit. Setting to 100 uses 100 anchors set along the RT space.
+rc.obi <-retcor.obiwarp(xsOne,plottype="deviation",profStep = 0.1,distFunc = "cor", 
+                         gapInit = 0.3,gapExtend=2.4) #,
+                         #center = setCenter)    
+
+xg <-group.density(rc.obi,minfrac=0.25,minsamp=1,bw=10,mzwid=0.002)     
+
+xgF <- fillPeaks(xg, method = "chrom")     
+
+save.image(NameOfFile)
+
+```
+
+
+
+```{r plotTIC, eval = FALSE}
+source("getTICs_KL.r")
+#xgN3 can be replaced with rc.obi
+#getTICs_KL(xcmsSet = xgN3[,c(6,12,18,29)], pdfname = "TICs_finalall_pos6.pdf",rt = "corrected")
+
+#plotting to check if peaks are aligned well
+getTICs_KL(xcmsSet = xgF, pdfname = fName_TICplot, rt = "corrected")
+
+```
+
+
+
+This next section had some issues with the CRAM data, and I did not manage to resolve them. Also issue with full set of LW samples.
+
+```{r makePDFofPickedPeaks, eval = FALSE}
+
+xs.fill <- xgF #must be grouped
+
+# 
+xeic.raw <- getEIC(xs.fill, rt = "raw", groupidx= 1:nrow(xs.fill@groups))
+xeic.corrected <- getEIC(xs.fill, rt = "corrected", groupidx= 1:nrow(xs.fill@groups))
+
+#colorList should be as long as the number of possible levels in the dataset...
+colorList <- c("deepskyblue","magenta","forestgreen","darkorchid","firebrick", "gold")
+
+#plot first feature from diffreport (not sorted after pval!!)
+cairo_pdf(file = fName_peaksPicked,onefile=TRUE)
+for (i in 1:nrow(xs.fill@groups)){
+  #for (i in 1:5){
+  
+  par(mfrow= c(2,1))
+  #rt row data
+  plot(xeic.raw, xs.fill,groupidx=i,col=colorList)
+  #rt corrected data
+  plot(xeic.corrected, xs.fill,groupidx=i,col=colorList)
+  
+}
+dev.off()
+
+```
+
+Go ahead and spit out some variables to the folder
+
+```{r SaveData, eval = TRUE}
+
+#this will spit out the list of all features identified
+write.csv(xgF@peaks,file = fName_allPeaks)
+
+```
+
+These are the pieces for CAMERA
+      
+```{r CAMERA, eval = TRUE}
+#
+#nSamples <- length(mzdatafiles)
+#xsa<-xsAnnotate(xgF,sample = c(1:nSamples))
+#xsa<-xsAnnotate(xgF,sample = 34) randomly try one sample for now
+xsa<-xsAnnotate(xgF)
+
+#group the features initially just by retention time
+xsaF <-groupFWHM(xsa)
+
+#figure out which features also have a matching 13C feature. Have to enter both 
+#the relative error (ppm) and the absolute error (mzabs)
+xsaFI <-findIsotopes(xsaF,ppm=3,mzabs = 0.01,minfrac = 1/nSamples,intval = c("into"))
+
+#now group by the correlations based on (1) intensity, (2) EIC, (3) isotopes...
+xsaC <-groupCorr(xsaFI,cor_eic_th=0.75,pval=0.05, graphMethod="hcs",
+ calcIso = TRUE, calcCiS = TRUE, calcCaS = FALSE)
+
+#setup the file to also look for adducts, only go with the primary adducts for the moment
+file <-system.file("rules/primary_adducts_neg.csv",package = "CAMERA")
+rules <-read.csv(file)
+an <-findAdducts(xsaC,polarity = "negative",rules=rules,ppm=3)
+
+#do some housecleaning
+rm(xsa,xsaF,xsaFI,xsaC)
+```
+
+
+And save the final steps
+
+```{r lastSave, eval = TRUE}
+#can plot some variables       
+#windows() #brings up a box for plotting that is outside RStudio (works better here)
+#plotEICs(an,pspec=2,maxlabel=5)
+#plotPsSpectrum(xsaC,2,maxlabel=5)
+
+#export the data to the CSV file
+
+#the write.csv at line 282 will only work if I ran CAMERA:
+if(0) {
+    #do nothing
+  } else {
+    write.csv(getPeaklist(an),file=fName_aligned) 
+}
+
+save.image(NameOfFile)
+#
+
+
+```
+
