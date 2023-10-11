@@ -1,5 +1,8 @@
 # Lumos
-4 December 2018
+**11 October 2023**\
+Update to transfer to _organization_ KujawinskiLaboratory. All prior edits as _user_ KujawinskiLaboratory were Krista Longnecker, whose GitHub name is now @redbluewater
+
+**4 December 2018**
 
 XCMS code to process data from Lumos.
 
